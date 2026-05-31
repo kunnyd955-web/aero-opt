@@ -1,76 +1,152 @@
-# aero-opt — 2D 翼型多保真度气动形状优化
+# aero-opt
 
-CST 参数化 + XFOIL($e^N$)/SU2($\gamma$-$Re_\theta$) 多保真度采样 + Co-Kriging 代理模型
-+ CMA-ES/NSGA-II 优化，最大化低-中雷诺数翼型升阻比 $L/D$。
+**2D Airfoil Multi-Fidelity Aerodynamic Shape Optimization**
+**二维翼型多保真度气动形状优化**
 
-完整方案见 [`airfoil_opt_project_plan.md`](airfoil_opt_project_plan.md)。
+CST parameterization · XFOIL (eᴺ) / SU2 (γ–Reθ) multi-fidelity sampling · Co-Kriging surrogate · CMA-ES / NSGA-II optimization
 
-## 当前进度
+CST 参数化 · XFOIL (eᴺ) / SU2 (γ–Reθ) 多保真度采样 · Co-Kriging 代理模型 · CMA-ES / NSGA-II 优化
 
-| 阶段 | 状态 | 说明 |
-|------|------|------|
-| Phase 0 CST 参数化 | ✅ 完成 | NACA 0012/2412 拟合 MSE < 1e-5 |
-| Phase 1 XFOIL 采样 | ✅ 打通 | 小批量端到端跑通，内存绑定后端 |
-| Phase 2 SU2 转捩 | ⬜ 待做 | 模板占位 (`hf_solver/templates/`) |
-| Phase 3 Co-Kriging | ⬜ 待做 | 脚本占位 (`surrogate/`) |
-| Phase 4 优化 | ⬜ 待做 | — |
+---
 
-## 环境配置
+## Overview / 项目简介
+
+**EN:** Maximize lift-to-drag ratio (L/D) for 2D airfoils at low-to-medium Reynolds numbers (Re = 10⁴–10⁶), where laminar-turbulent transition is the dominant physical mechanism. A multi-fidelity pipeline combines cheap XFOIL panel-method evaluations with expensive SU2 transition-model CFD, bridged by a Co-Kriging surrogate to enable gradient-free global optimization.
+
+**中文：** 在低-中雷诺数（Re = 10⁴–10⁶）条件下，层流-湍流转捩是影响翼型阻力的核心因素。本项目构建多保真度优化流水线：以廉价的 XFOIL 面板法大规模采样，结合昂贵的 SU2 转捩 CFD 计算，通过 Co-Kriging 代理模型桥接，最终用无梯度全局优化器最大化翼型升阻比 L/D。
+
+Full technical plan: [`airfoil_opt_project_plan.md`](airfoil_opt_project_plan.md)
+
+---
+
+## Pipeline Architecture / 流水线架构
+
+```
+Design Space (CST, 10 params)
+        │
+        ▼
+  LHS Sampling (doe/)
+        │
+   ┌────┴────┐
+   │         │
+   ▼         ▼
+XFOIL LF   SU2 HF        ← multi-fidelity solvers
+(lf_solver) (hf_solver)
+   │         │
+   └────┬────┘
+        ▼
+  Co-Kriging Surrogate (surrogate/)
+        │
+        ▼
+  CMA-ES / NSGA-II (optimization/)
+        │
+        ▼
+  Optimal Airfoil Geometry
+```
+
+---
+
+## Progress / 当前进度
+
+| Phase | Status | Description / 说明 |
+|-------|--------|---------------------|
+| Phase 0 — CST Parameterization | ✅ Done | NACA 0012/2412 fit MSE < 1e-5 |
+| Phase 1 — XFOIL LF Sampling | ✅ Done | End-to-end batch sampling, in-memory backend |
+| Phase 2 — SU2 Transition CFD | ⬜ Todo | Template placeholder in `hf_solver/templates/` |
+| Phase 3 — Co-Kriging Surrogate | ⬜ Todo | Module stub in `surrogate/` |
+| Phase 4 — Global Optimization | ⬜ Todo | — |
+
+---
+
+## Setup / 环境配置
 
 ```bash
-conda env create -f environment.yml      # 创建 aero-opt 环境
+conda env create -f environment.yml
 conda activate aero-opt
 ```
 
-环境已含: SU2 8.5、gmsh、openmpi/mpi4py、numpy/scipy/sklearn、smt、cma、pymoo，
-以及 **xfoil-python**（从 GitHub 源码编译的内存绑定后端，非 subprocess）。
+**Included / 已含：** SU2 8.5 · gmsh · openmpi / mpi4py · numpy / scipy / scikit-learn · smt · cma · pymoo · xfoil-python (f2py in-memory backend, not subprocess)
 
-> SU2 环境变量（仅 Phase 2 需要）：
+> **SU2 environment variables (Phase 2 only / 仅 Phase 2 需要):**
 > ```bash
 > export SU2_RUN=$CONDA_PREFIX/bin
 > export SU2_HOME=$CONDA_PREFIX
 > export PATH=$SU2_RUN:$PATH
 > ```
 
-## 快速验证
+---
+
+## Quick Start / 快速验证
 
 ```bash
 conda activate aero-opt
-python -m pytest tests/ -v                              # Phase 0 + Phase 1 测试
-python scripts/sample_lf_batch.py --n 20                # 端到端小批量采样
-python doe/doe_lhs.py                                   # 生成全量 LHS 采样点
+
+# Run tests / 运行测试
+python -m pytest tests/ -v
+
+# Small batch end-to-end sampling / 小批量端到端采样
+python scripts/sample_lf_batch.py --n 20
+
+# Generate full LHS design points / 生成全量 LHS 采样点
+python doe/doe_lhs.py
 ```
 
-## 目录
+---
+
+## Repository Structure / 目录结构
 
 ```
-geometry/   CST 参数化 (cst_params)、NACA 真值 (naca)、网格生成 (mesh_generator, Phase 2)
-doe/        拉丁超立方采样 (doe_lhs)
-lf_solver/  低保真求解器: XFOIL 封装 (run_xfoil)
-hf_solver/  高保真求解器: SU2 转捩模型 (Phase 2)
-surrogate/  Co-Kriging 代理模型 (Phase 3)
-optimization/ CMA-ES / NSGA-II (Phase 4)
-scripts/    采样驱动脚本
-tests/      验证测试
-notebooks/  分析与可视化
+aero-opt/
+├── geometry/        CST parameterization, NACA reference, mesh generation (Phase 2)
+│                    CST 参数化、NACA 真值、网格生成
+├── doe/             Latin Hypercube Sampling
+│                    拉丁超立方采样
+├── lf_solver/       Low-fidelity solver: XFOIL wrapper
+│                    低保真求解器：XFOIL 封装
+├── hf_solver/       High-fidelity solver: SU2 transition model (Phase 2)
+│                    高保真求解器：SU2 转捩模型
+├── surrogate/       Co-Kriging surrogate model (Phase 3)
+│                    Co-Kriging 代理模型
+├── optimization/    CMA-ES / NSGA-II optimizer (Phase 4)
+│                    全局优化器
+├── scripts/         Batch sampling drivers / 采样驱动脚本
+├── tests/           Unit & integration tests / 验证测试
+├── notebooks/       Analysis & visualization / 分析与可视化
+├── environment.yml  Conda environment spec
+└── environment.lock.yml  Locked dependencies
 ```
 
-## 对方案文档的修正
+---
 
-实施中发现并修正了原方案的若干技术问题，记录于此以便对照：
+## Implementation Notes / 实施注记
 
-1. **设计空间边界**（`doe/doe_lhs.py`）：方案原文把 10 个 CST 系数全设为对称区间
-   `[-0.3, 0.3]`，实测仅约 **1.4%** 的随机翼型几何合法。改为"上翼面系数取正
-   `[0.05, 0.30]`、下翼面取负 `[-0.30, -0.05]`"后合法率升至 **~97%**。
-2. **XFOIL 后端**：方案称"xfoil-python 调用系统 XFOIL"不准确；该包用 f2py 把
-   XFOIL 编译为共享库（内存绑定，不起子进程）。PyPI sdist 残缺，须从 GitHub 源码装。
-3. **CST x 域裁剪**（`geometry/cst_params.py`）：弯度翼型前缘 `x` 经几何旋转会微小
-   越界，导致 `x**0.5` 出现 NaN；已在 `cst_surface` 内裁剪到 `[0, 1]`。
-4. **XFOIL 单点求解**：退化的 `aseq(a, a, da)` 返回空，单点必须用 `xf.a(alpha)`。
+Deviations from the original plan discovered during implementation:
+实施中发现并修正的原方案技术问题：
 
-## 已知限制
+1. **Design space bounds** (`doe/doe_lhs.py`): Original plan set all 10 CST coefficients to the symmetric range `[-0.3, 0.3]`, yielding only ~1.4% geometrically valid airfoils. Changed to upper-surface `[0.05, 0.30]` and lower-surface `[-0.30, -0.05]`; validity rate rose to ~97%.
+   **设计空间边界**：原方案对称区间导致合法率仅 1.4%，改为上/下翼面分区后升至约 97%。
 
-- XFOIL 对**厚翼型（>12%）在中雷诺数下的黏性求解**存在固有收敛困难，小批量收敛率
-  约 84%。方案缓解措施：收窄攻角上限、对失败点回退全湍流 RANS（见方案 4.3）。
-- SU2 配置使用旧版 `PHYSICAL_PROBLEM=` 语法；SU2 8.x 已改为 `SOLVER=`，Phase 2
-  实施时按 `hf_solver/templates/` 中的占位说明校准。
+2. **XFOIL backend**: The plan described "xfoil-python calls system XFOIL" — incorrect. The package compiles XFOIL as a shared library via f2py (in-memory, no subprocess). PyPI sdist is incomplete; install from GitHub source.
+   **XFOIL 后端**：该包通过 f2py 将 XFOIL 编译为共享库，非子进程调用；须从 GitHub 源码安装。
+
+3. **CST x-domain clipping** (`geometry/cst_params.py`): Cambered airfoil leading-edge coordinates can slightly exceed `[0, 1]` after geometric rotation, causing `x**0.5` NaN. Fixed by clamping inside `cst_surface`.
+   **CST x 域裁剪**：弯度翼型前缘坐标旋转后可能微小越界，导致 NaN，已在函数内裁剪。
+
+4. **XFOIL single-point solve**: Degenerate `aseq(a, a, da)` returns empty; single-point calls must use `xf.a(alpha)`.
+   **XFOIL 单点求解**：退化序列返回空，单点必须用 `xf.a(alpha)`。
+
+---
+
+## Known Limitations / 已知限制
+
+- **XFOIL convergence**: Viscous solver convergence is inherently difficult for thick airfoils (>12%) at medium Re. Small-batch convergence rate ~84%. Mitigation: narrow AoA upper bound; fall back to fully-turbulent RANS for failed points (see plan §4.3).
+  **XFOIL 收敛**：厚翼型中雷诺数下固有收敛困难，小批量收敛率约 84%。缓解措施：收窄攻角上限，失败点回退全湍流 RANS。
+
+- **SU2 config syntax**: Templates use legacy `PHYSICAL_PROBLEM=` syntax; SU2 8.x changed to `SOLVER=`. Calibrate against placeholder notes in `hf_solver/templates/` when implementing Phase 2.
+  **SU2 配置语法**：模板使用旧版语法，SU2 8.x 已改为 `SOLVER=`，Phase 2 实施时需校准。
+
+---
+
+## License / 许可证
+
+MIT
