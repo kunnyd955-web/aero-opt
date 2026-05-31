@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 采样 / 求解结果数据 (体积大, 可由脚本重新生成)
+*.npy
+geometry/meshes/*
+lf_solver/results/*
+hf_solver/results/*
+surrogate/models/*
+optimization/results/*
+!**/.gitkeep
+
+# SU2 运行产物
+*.vtu
+*.csv.gz
+solution_*.dat
+forces_*.dat
+convergence_*
+
+# 环境锁定文件保留, 但忽略临时导出
+environment.tmp.yml
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+*:Zone.Identifier

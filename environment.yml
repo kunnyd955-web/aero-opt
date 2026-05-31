@@ -1,0 +1,38 @@
+name: aero-opt
+channels:
+  - conda-forge
+dependencies:
+  # --- Python core ---
+  - python=3.11          # 3.11 保 xfoil-python (f2py) 编译兼容性
+  # --- 科学计算栈 ---
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+  - scikit-learn
+  - jupyter
+  - ipykernel
+  - pytest
+  # --- 编译工具链 (xfoil-python f2py 编译所需) ---
+  - cmake
+  - make
+  - ninja
+  - fortran-compiler
+  - c-compiler
+  # --- 网格 Python 绑定 ---
+  - python-gmsh
+  # --- 网格 / CFD (Phase 2) ---
+  - gmsh                 # 网格生成
+  - meshio               # 网格格式转换
+  - openmpi              # SU2 并行
+  - mpi4py
+  - su2                  # 若与 numpy/smt 求解冲突, 改装入独立 aero-cfd env
+  # --- 优化 / 代理模型 ---
+  - pymoo                # NSGA-II 多目标 (Phase 4)
+  - pip
+  - pip:
+      - smt              # Co-Kriging (MFK) + LHS 采样
+      - cma              # CMA-ES (Phase 4)
+      # xfoil-python: PyPI 上的 sdist 残缺 (缺 CMakeLists/Fortran 源), 必须从
+      # GitHub 源码装; 依赖上面 conda 装的 cmake + fortran-compiler 编译。
+      - "git+https://github.com/DARcorporation/xfoil-python.git"
