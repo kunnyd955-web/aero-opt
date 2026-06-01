@@ -52,7 +52,7 @@ XFOIL LF   SU2 HF        ← multi-fidelity solvers
 |-------|--------|---------------------|
 | Phase 0 — CST Parameterization | ✅ Done | NACA 0012/2412 fit MSE < 1e-5 |
 | Phase 1 — XFOIL LF Sampling | ✅ Done | End-to-end batch sampling, in-memory backend |
-| Phase 2 — SU2 Transition CFD | ⬜ Todo | Template placeholder in `hf_solver/templates/` |
+| Phase 2 — SU2 Transition CFD | ✅ Done | gmsh BL mesh + SU2 8.5 SST/γ-Reθ; NACA0012 Re=2e5 → CL 0.446 / Cd 0.021 |
 | Phase 3 — Co-Kriging Surrogate | ⬜ Todo | Module stub in `surrogate/` |
 | Phase 4 — Global Optimization | ⬜ Todo | — |
 
@@ -84,8 +84,12 @@ conda activate aero-opt
 # Run tests / 运行测试
 python -m pytest tests/ -v
 
-# Small batch end-to-end sampling / 小批量端到端采样
+# Small batch low-fidelity (XFOIL) sampling / 小批量低保真采样
 python scripts/sample_lf_batch.py --n 20
+
+# Small batch high-fidelity (SU2 transition) sampling / 小批量高保真采样
+# ~2 min/point: mesh + SST/γ-Reθ CFD. Needs SU2 env vars (see Setup).
+python scripts/sample_hf_batch.py --n 2
 
 # Generate full LHS design points / 生成全量 LHS 采样点
 python doe/doe_lhs.py
@@ -142,8 +146,11 @@ Deviations from the original plan discovered during implementation:
 - **XFOIL convergence**: Viscous solver convergence is inherently difficult for thick airfoils (>12%) at medium Re. Small-batch convergence rate ~84%. Mitigation: narrow AoA upper bound; fall back to fully-turbulent RANS for failed points (see plan §4.3).
   **XFOIL 收敛**：厚翼型中雷诺数下固有收敛困难，小批量收敛率约 84%。缓解措施：收窄攻角上限，失败点回退全湍流 RANS。
 
-- **SU2 config syntax**: Templates use legacy `PHYSICAL_PROBLEM=` syntax; SU2 8.x changed to `SOLVER=`. Calibrate against placeholder notes in `hf_solver/templates/` when implementing Phase 2.
-  **SU2 配置语法**：模板使用旧版语法，SU2 8.x 已改为 `SOLVER=`，Phase 2 实施时需校准。
+- **SU2 transition drag bias**: SST/γ-Reθ RANS predicts higher Cd than XFOIL's panel + eᴺ (NACA0012 Re=2e5: Cd≈0.021 vs XFOIL ≈0.013), partly from the blunt-TE base drag (0.4%c gap). This is the *systematic LF→HF bias* Co-Kriging (Phase 3) is built to correct, not an error. Symmetric-airfoil Cm≈0 confirms solver correctness.
+  **SU2 转捩阻力偏置**：SST/γ-Reθ RANS 的 Cd 系统性高于 XFOIL（含钝后缘基阻），这正是 Phase 3 Co-Kriging 要校正的低-高保真系统偏差；对称翼型 Cm≈0 佐证求解正确。
+
+- **HF turbulence-intensity calibration**: Inlet `FREESTREAM_TURBULENCEINTENSITY=0.002` (0.2%) compensates convective decay so leading-edge Tu≈0.1% (Ncrit=9 equivalent). The exact factor should be back-calculated from a measured LE Tu once volume output is post-processed (plan §5.2).
+  **HF 湍流度校准**：入口 0.2% 补偿衰减使前缘约 0.1%，精确因子待用前缘实测值反推。
 
 ---
 
