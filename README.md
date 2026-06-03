@@ -53,7 +53,7 @@ XFOIL LF   SU2 HF        ← multi-fidelity solvers
 | Phase 0 — CST Parameterization | ✅ Done | NACA 0012/2412 fit MSE < 1e-5 |
 | Phase 1 — XFOIL LF Sampling | ✅ Done | End-to-end batch sampling, in-memory backend |
 | Phase 2 — SU2 Transition CFD | ✅ Done | gmsh BL mesh + SU2 8.5 SST/γ-Reθ; NACA0012 Re=2e5 → CL 0.446 / Cd 0.021 |
-| Phase 3 — Co-Kriging Surrogate | ⬜ Todo | Module stub in `surrogate/` |
+| Phase 3 — Co-Kriging Surrogate | 🔄 WIP | MFK (autoregressive) Cl/Cd surrogate over LF(808)+HF(26); module + 6 tests pass; LOO-CV pending |
 | Phase 4 — Global Optimization | ⬜ Todo | — |
 
 ---

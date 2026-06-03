@@ -1,23 +1,31 @@
-"""Phase 2 端到端高保真采样驱动 (方案 5.1 策略 B)。
+"""Phase 2 端到端高保真采样驱动 (方案 5.1 策略 B) —— 进程级并行版。
 
 流程: 高保真设计点 (sample_hf, 转捩活跃子区间) -> CST 生成翼型 (cst_params)
       -> gmsh 生成网格 (mesh_generator) -> SU2 转捩求解 (run_su2)
       -> 存 Cl/Cd 数组 (未收敛点写 NaN) -> 报告收敛率与耗时。
 
+加速 (方案外, 实施优化):
+  1. 进程级并行: 每个 SU2 case 单进程单核、各自临时工作目录, 用 ProcessPoolExecutor
+     并发 --workers 个 (默认 6)。gmsh 全局状态非线程安全, 故必须用"多进程"而非
+     多线程隔离。50 点 ~100min(串行) -> ~15min(6 并发)。
+  2. 力系数 Cauchy 早停 (见 templates/su2_transition.cfg): 力稳定即停, 单 case 再快 ~2x。
+
 与 sample_lf_batch 对称, 但单点成本高两个数量级 (秒级 vs 分钟级), 故默认只跑
 极小批量 (n=2) 做链路验证; 加 --full 跑满 50 个高保真样本 (方案 2 架构)。
 
 用法:
-    conda run -n aero-opt python scripts/sample_hf_batch.py            # 2 点
-    conda run -n aero-opt python scripts/sample_hf_batch.py --n 5
-    conda run -n aero-opt python scripts/sample_hf_batch.py --full     # 50 点
+    conda run -n aero-opt python scripts/sample_hf_batch.py                  # 2 点
+    conda run -n aero-opt python scripts/sample_hf_batch.py --n 5 --workers 4
+    conda run -n aero-opt python scripts/sample_hf_batch.py --full           # 50 点, 6 并发
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -34,8 +42,31 @@ TU = 0.002       # 入口湍流度 0.2% (补偿衰减后前缘约 0.1%, 对应 N
 TURB2LAM = 10.0  # 涡粘比初值
 
 
+def _run_one(task: dict) -> dict:
+    """单点 worker (顶层函数以便 ProcessPoolExecutor 跨进程序列化)。
+
+    几何先过滤 (快), 非法几何不浪费昂贵的网格+CFD 调用。run_su2 自身从不抛异常,
+    内部已设 SU2_RUN/SU2_HOME 并用独立临时工作目录, 故各 worker 完全隔离。
+    """
+    i = task["idx"]
+    A_up, A_lo = task["A_up"], task["A_lo"]
+    alpha, Re = task["alpha"], task["Re"]
+
+    if not check_geometry(A_up, A_lo, t_min=0.10):
+        return {"idx": i, "geo_invalid": True, "alpha": alpha, "Re": Re}
+
+    coords = generate_airfoil(A_up, A_lo)
+    t0 = time.time()
+    res = run_su2(coords, alpha=alpha, Re=Re, mach=MA, tu=TU,
+                  turb2lam=TURB2LAM, max_iter=task["max_iter"],
+                  timeout=task["timeout"])
+    res.update({"idx": i, "geo_invalid": False, "alpha": alpha, "Re": Re,
+                "dt": time.time() - t0})
+    return res
+
+
 def run_batch(n: int, seed: int = 7, max_iter: int = 8000,
-              timeout: float = 1800.0) -> dict:
+              timeout: float = 1800.0, workers: int = 6) -> dict:
     if not SU2_AVAILABLE:
         raise RuntimeError("SU2_CFD 不在 PATH, 请先 conda activate aero-opt")
 
@@ -47,33 +78,39 @@ def run_batch(n: int, seed: int = 7, max_iter: int = 8000,
     geo_invalid = 0
     residual_ok = 0
 
+    tasks = [
+        {"idx": i, "A_up": X[i, :5], "A_lo": X[i, 5:10],
+         "alpha": float(X[i, 10]), "Re": float(X[i, 11]),
+         "max_iter": max_iter, "timeout": timeout}
+        for i in range(n)
+    ]
+
+    workers = max(1, min(workers, n))
+    done = 0
     t0 = time.time()
-    for i in range(n):
-        A_up, A_lo = X[i, :5], X[i, 5:10]
-        alpha, Re = float(X[i, 10]), float(X[i, 11])
-
-        # 几何先过滤 (快), 非法几何不浪费昂贵的网格+CFD 调用
-        if not check_geometry(A_up, A_lo, t_min=0.10):
-            geo_invalid += 1
-            print(f"[{i+1}/{n}] 几何非法, 跳过", flush=True)
-            continue
-
-        coords = generate_airfoil(A_up, A_lo)
-        ti = time.time()
-        res = run_su2(coords, alpha=alpha, Re=Re, mach=MA, tu=TU,
-                      turb2lam=TURB2LAM, max_iter=max_iter, timeout=timeout)
-        dt_i = time.time() - ti
-        if res["converged"]:
-            Cl[i] = res["Cl"]
-            Cd[i] = res["Cd"]
-            residual_ok += int(res["residual_ok"])
-            tag = "残差收敛" if res["residual_ok"] else "力收敛(残差未达标)"
-            print(f"[{i+1}/{n}] α={alpha:.1f} Re={Re:.0e}  "
-                  f"Cl={res['Cl']:.4f} Cd={res['Cd']:.5f} "
-                  f"L/D={res['Cl']/res['Cd']:.1f}  {tag}  {dt_i:.0f}s", flush=True)
-        else:
-            print(f"[{i+1}/{n}] α={alpha:.1f} Re={Re:.0e}  失败: "
-                  f"{res['reason'][:80]}  {dt_i:.0f}s", flush=True)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(_run_one, t): t["idx"] for t in tasks}
+        for fut in as_completed(futs):
+            res = fut.result()
+            i = res["idx"]
+            done += 1
+            alpha, Re = res["alpha"], res["Re"]
+            if res.get("geo_invalid"):
+                geo_invalid += 1
+                print(f"[{done}/{n}] #{i} 几何非法, 跳过", flush=True)
+                continue
+            if res.get("converged"):
+                Cl[i] = res["Cl"]
+                Cd[i] = res["Cd"]
+                residual_ok += int(res["residual_ok"])
+                tag = "残差收敛" if res["residual_ok"] else "力收敛(残差未达标)"
+                print(f"[{done}/{n}] #{i} α={alpha:.1f} Re={Re:.0e}  "
+                      f"Cl={res['Cl']:.4f} Cd={res['Cd']:.5f} "
+                      f"L/D={res['Cl']/res['Cd']:.1f}  {tag}  "
+                      f"{res['dt']:.0f}s", flush=True)
+            else:
+                print(f"[{done}/{n}] #{i} α={alpha:.1f} Re={Re:.0e}  失败: "
+                      f"{res['reason'][:80]}  {res['dt']:.0f}s", flush=True)
     dt = time.time() - t0
 
     out_dir = ROOT / "hf_solver" / "results"
@@ -87,6 +124,7 @@ def run_batch(n: int, seed: int = 7, max_iter: int = 8000,
     return {
         "n": n, "geo_invalid": geo_invalid, "n_converged": n_conv,
         "residual_ok": residual_ok, "conv_rate": conv_rate, "seconds": dt,
+        "workers": workers,
         "Cl_path": out_dir / "Cl_hf.npy", "Cd_path": out_dir / "Cd_hf.npy",
     }
 
@@ -97,22 +135,25 @@ def main() -> None:
     ap.add_argument("--full", action="store_true", help="跑满 50 个高保真样本")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--max-iter", type=int, default=8000,
-                    help="单点 SU2 最大迭代 (默认 8000)")
+                    help="单点 SU2 最大迭代 (默认 8000, 力系数早停通常更早退出)")
     ap.add_argument("--timeout", type=float, default=1800.0,
                     help="单点墙钟超时秒数 (默认 1800)")
+    ap.add_argument("--workers", type=int, default=6,
+                    help="并发进程数 (默认 6; 机器 12 核, 留余量给 OS)")
     args = ap.parse_args()
     n = 50 if args.full else args.n
 
-    print(f"SU2 可用: {SU2_AVAILABLE} | 样本数: {n} | "
-          f"Ma={MA} Tu={TU} max_iter={args.max_iter}", flush=True)
+    print(f"SU2 可用: {SU2_AVAILABLE} | 样本数: {n} | 并发: {args.workers} | "
+          f"Ma={MA} Tu={TU} max_iter={args.max_iter} | CPU 核: {os.cpu_count()}",
+          flush=True)
     r = run_batch(n, seed=args.seed, max_iter=args.max_iter,
-                  timeout=args.timeout)
+                  timeout=args.timeout, workers=args.workers)
     print("-" * 60)
     print(f"几何非法点    : {r['geo_invalid']}/{r['n']}")
     print(f"SU2 收敛点    : {r['n_converged']} "
           f"(收敛率 {r['conv_rate']*100:.1f}%, 其中残差达标 {r['residual_ok']})")
     print(f"耗时          : {r['seconds']:.1f}s "
-          f"({r['seconds']/max(r['n'],1):.0f} s/点)")
+          f"({r['seconds']/max(r['n'],1):.0f} s/点, {r['workers']} 并发)")
     print(f"已保存        : {r['Cl_path'].name}, {r['Cd_path'].name}")
 
 
