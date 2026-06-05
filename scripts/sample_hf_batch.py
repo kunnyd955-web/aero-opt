@@ -65,14 +65,12 @@ def _run_one(task: dict) -> dict:
     return res
 
 
-def run_batch(n: int, seed: int = 7, max_iter: int = 8000,
-              timeout: float = 1800.0, workers: int = 6) -> dict:
-    if not SU2_AVAILABLE:
-        raise RuntimeError("SU2_CFD 不在 PATH, 请先 conda activate aero-opt")
+def _run_points(X: np.ndarray, max_iter: int, timeout: float,
+                workers: int) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """对给定设计点矩阵 X (n,12) 并行跑 SU2, 返回 (Cl, Cd, geo_invalid, residual_ok)。
 
-    doe_dir = ROOT / "doe"
-    X = sample_hf(n=n, seed=seed, save_path=doe_dir / "X_hf.npy")
-
+    未收敛/几何非法点对应 Cl/Cd 写 NaN, 行序与 X 严格对齐 (按 idx 回填)。"""
+    n = len(X)
     Cl = np.full(n, np.nan)
     Cd = np.full(n, np.nan)
     geo_invalid = 0
@@ -87,7 +85,6 @@ def run_batch(n: int, seed: int = 7, max_iter: int = 8000,
 
     workers = max(1, min(workers, n))
     done = 0
-    t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(_run_one, t): t["idx"] for t in tasks}
         for fut in as_completed(futs):
@@ -111,21 +108,63 @@ def run_batch(n: int, seed: int = 7, max_iter: int = 8000,
             else:
                 print(f"[{done}/{n}] #{i} α={alpha:.1f} Re={Re:.0e}  失败: "
                       f"{res['reason'][:80]}  {res['dt']:.0f}s", flush=True)
-    dt = time.time() - t0
+    return Cl, Cd, geo_invalid, residual_ok
 
+
+def run_batch(n: int, seed: int = 7, max_iter: int = 8000,
+              timeout: float = 1800.0, workers: int = 6,
+              append: bool = False) -> dict:
+    if not SU2_AVAILABLE:
+        raise RuntimeError("SU2_CFD 不在 PATH, 请先 conda activate aero-opt")
+
+    doe_dir = ROOT / "doe"
     out_dir = ROOT / "hf_solver" / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
-    np.save(out_dir / "Cl_hf.npy", Cl)
-    np.save(out_dir / "Cd_hf.npy", Cd)
+    x_path = doe_dir / "X_hf.npy"
+    cl_path, cd_path = out_dir / "Cl_hf.npy", out_dir / "Cd_hf.npy"
 
-    n_conv = int(np.sum(~np.isnan(Cl)))
+    if append:
+        # 追加模式: 续采一批新点 (新 seed), 只对新点跑 CFD, 再拼到已有结果后面。
+        X_old = np.load(x_path)
+        Cl_old = np.load(cl_path)
+        Cd_old = np.load(cd_path)
+        X_new = sample_hf(n=n, seed=seed)  # 不覆盖 X_hf, 稍后拼接后再存
+        # 防呆: 新批与旧批若有点几乎重合 (同 seed 误用), 说明白跑, 直接拒绝。
+        dmin = np.min(np.linalg.norm(
+            X_new[:, None, :] - X_old[None, :, :], axis=-1))
+        if dmin < 1e-9:
+            raise SystemExit(
+                f"追加批与已有点重复 (min dist={dmin:.2e}); 请用与历史不同的 --seed")
+        print(f"追加模式: 已有 {len(X_old)} 点 (有效 {int(np.isfinite(Cl_old).sum())}), "
+              f"续采 {n} 新点 (seed={seed}, 距旧批最近 {dmin:.3f})", flush=True)
+    else:
+        X_new = sample_hf(n=n, seed=seed, save_path=x_path)
+        X_old = Cl_old = Cd_old = None
+
+    t0 = time.time()
+    Cl_new, Cd_new, geo_invalid, residual_ok = _run_points(
+        X_new, max_iter, timeout, workers)
+    dt = time.time() - t0
+
+    if append:
+        X = np.vstack([X_old, X_new])
+        Cl = np.concatenate([Cl_old, Cl_new])
+        Cd = np.concatenate([Cd_old, Cd_new])
+        np.save(x_path, X)
+    else:
+        Cl, Cd = Cl_new, Cd_new
+    np.save(cl_path, Cl)
+    np.save(cd_path, Cd)
+
+    n_conv_new = int(np.sum(~np.isnan(Cl_new)))
     n_geo_ok = n - geo_invalid
-    conv_rate = n_conv / n_geo_ok if n_geo_ok else 0.0
+    conv_rate = n_conv_new / n_geo_ok if n_geo_ok else 0.0
     return {
-        "n": n, "geo_invalid": geo_invalid, "n_converged": n_conv,
+        "n": n, "geo_invalid": geo_invalid, "n_converged": n_conv_new,
         "residual_ok": residual_ok, "conv_rate": conv_rate, "seconds": dt,
-        "workers": workers,
-        "Cl_path": out_dir / "Cl_hf.npy", "Cd_path": out_dir / "Cd_hf.npy",
+        "workers": max(1, min(workers, n)),
+        "total_pts": len(Cl), "total_valid": int(np.isfinite(Cl).sum()),
+        "Cl_path": cl_path, "Cd_path": cd_path,
     }
 
 
@@ -140,20 +179,24 @@ def main() -> None:
                     help="单点墙钟超时秒数 (默认 1800)")
     ap.add_argument("--workers", type=int, default=6,
                     help="并发进程数 (默认 6; 机器 12 核, 留余量给 OS)")
+    ap.add_argument("--append", action="store_true",
+                    help="追加模式: 续采新点拼到已有 HF 数据后 (需配不同 --seed)")
     args = ap.parse_args()
     n = 50 if args.full else args.n
 
     print(f"SU2 可用: {SU2_AVAILABLE} | 样本数: {n} | 并发: {args.workers} | "
+          f"追加: {args.append} (seed={args.seed}) | "
           f"Ma={MA} Tu={TU} max_iter={args.max_iter} | CPU 核: {os.cpu_count()}",
           flush=True)
     r = run_batch(n, seed=args.seed, max_iter=args.max_iter,
-                  timeout=args.timeout, workers=args.workers)
+                  timeout=args.timeout, workers=args.workers, append=args.append)
     print("-" * 60)
-    print(f"几何非法点    : {r['geo_invalid']}/{r['n']}")
-    print(f"SU2 收敛点    : {r['n_converged']} "
+    print(f"本批几何非法点: {r['geo_invalid']}/{r['n']}")
+    print(f"本批 SU2 收敛 : {r['n_converged']} "
           f"(收敛率 {r['conv_rate']*100:.1f}%, 其中残差达标 {r['residual_ok']})")
     print(f"耗时          : {r['seconds']:.1f}s "
           f"({r['seconds']/max(r['n'],1):.0f} s/点, {r['workers']} 并发)")
+    print(f"累计 HF 数据  : {r['total_pts']} 点 (有效 {r['total_valid']})")
     print(f"已保存        : {r['Cl_path'].name}, {r['Cd_path'].name}")
 
 

@@ -53,7 +53,7 @@ XFOIL LF   SU2 HF        ← multi-fidelity solvers
 | Phase 0 — CST Parameterization | ✅ Done | NACA 0012/2412 fit MSE < 1e-5 |
 | Phase 1 — XFOIL LF Sampling | ✅ Done | End-to-end batch sampling, in-memory backend |
 | Phase 2 — SU2 Transition CFD | ✅ Done | gmsh BL mesh + SU2 8.5 SST/γ-Reθ; NACA0012 Re=2e5 → CL 0.446 / Cd 0.021 |
-| Phase 3 — Co-Kriging Surrogate | 🔄 WIP | MFK (autoregressive) Cl/Cd surrogate over LF(808)+HF(26); module + 6 tests pass; LOO-CV pending |
+| Phase 3 — Co-Kriging Surrogate | ✅ Done | MFK Cl/Cd surrogate over LF(808)+HF(**55**, expanded from 26 via `--append`); 26-pt LOO-CV: Cd R²≈0.61 (Co-Kriging RMSE −3% vs HF-only), Cl R²≈0.20; 55-pt re-CV pending; 6 tests pass |
 | Phase 4 — Global Optimization | ⬜ Todo | — |
 
 ---
@@ -151,6 +151,9 @@ Deviations from the original plan discovered during implementation:
 
 - **HF turbulence-intensity calibration**: Inlet `FREESTREAM_TURBULENCEINTENSITY=0.002` (0.2%) compensates convective decay so leading-edge Tu≈0.1% (Ncrit=9 equivalent). The exact factor should be back-calculated from a measured LE Tu once volume output is post-processed (plan §5.2).
   **HF 湍流度校准**：入口 0.2% 补偿衰减使前缘约 0.1%，精确因子待用前缘实测值反推。
+
+- **Surrogate accuracy is HF-sample-limited**: LOO-CV (26 HF points) gives a usable Cd model (R²≈0.61, Co-Kriging RMSE 3% below single-fidelity KRG — the multi-fidelity correction works) but a weak Cl model (R²≈0.20, no multi-fidelity gain). 26 points in a 12-D design space is sparse; Cl prediction needs more HF samples (or adaptive infill during Phase 4) before optimization can trust absolute L/D. The HF set has since been expanded 26→55 valid points (`sample_hf_batch.py --append --seed <new>`, retrained model saved); the 55-point LOO-CV to re-quantify Cl gain is still pending. Training-side mitigations already in place: input normalization by `LF_BOUNDS`, LF-point caps (`--fit-lf-cap`/`--cv-lf-cap`) to bound MFK's O(n³) cost.
+  **代理精度受高保真样本量限制**：26 个 HF 点的 LOO-CV 下 Cd 模型可用（R²≈0.61，多保真较单保真 RMSE 降 3%，校正生效），但 Cl 模型偏弱（R²≈0.20，无多保真增益）。12 维空间 26 点过稀疏，Cl 需补采 HF 点。现已用 `--append` 把有效 HF 点从 26 扩到 55 并重训模型，55 点的 LOO-CV 复评待补。
 
 ---
 

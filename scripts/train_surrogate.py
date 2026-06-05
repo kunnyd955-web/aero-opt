@@ -64,7 +64,7 @@ def _subsample_lf(X_lf, y_lf, cap, seed=0):
     return X[idx], y[idx]
 
 
-def loo_cv_cokriging(X_lf, y_lf, X_hf, y_hf, bounds, lf_cap=250) -> dict:
+def loo_cv_cokriging(X_lf, y_lf, X_hf, y_hf, bounds, lf_cap=250, tag="") -> dict:
     """对高保真点做留一交叉验证 (每次留 1 个 HF 点作测试)。
 
     LF 点采样封顶到 lf_cap 以控成本 (见 _subsample_lf)。"""
@@ -74,11 +74,15 @@ def loo_cv_cokriging(X_lf, y_lf, X_hf, y_hf, bounds, lf_cap=250) -> dict:
     keep = np.isfinite(yh)
     Xh, yh = Xh[keep], yh[keep]
     preds = np.full(len(yh), np.nan)
+    t0 = time.time()
     for i in range(len(yh)):
         tr = np.ones(len(yh), dtype=bool)
         tr[i] = False
         m = CoKriging(bounds).fit(Xl, yl, Xh[tr], yh[tr])
-        preds[i], _ = m.predict(Xh[i:i + 1])
+        mean, _ = m.predict(Xh[i:i + 1])
+        preds[i] = float(np.ravel(mean)[0])
+        print(f"    [{tag} Co-Kriging] 折 {i+1}/{len(yh)} "
+              f"({time.time()-t0:.0f}s)", flush=True)
     return _metrics(yh, preds)
 
 
@@ -108,7 +112,14 @@ def main() -> None:
     ap.add_argument("--no-cv", action="store_true", help="跳过 LOO-CV (快)")
     ap.add_argument("--cv-lf-cap", type=int, default=250,
                     help="LOO-CV 重拟合时低保真点采样上限 (控成本, 默认 250)")
+    ap.add_argument("--fit-lf-cap", type=int, default=400,
+                    help="全量拟合的低保真点采样上限 (控 CPU 负载, MFK 成本 O(n^3); "
+                         "默认 400, 设 0 用全部点)")
+    ap.add_argument("--skip-fit", action="store_true",
+                    help="跳过全量拟合/保存 (模型已在磁盘), 直接跑 LOO-CV")
     args = ap.parse_args()
+
+    fit_cap = args.fit_lf_cap if args.fit_lf_cap and args.fit_lf_cap > 0 else None
 
     d = _load()
     bounds = LF_BOUNDS
@@ -119,16 +130,29 @@ def main() -> None:
     if n_hf_ok < 3:
         raise SystemExit(f"高保真有效点过少 ({n_hf_ok}), 先跑 sample_hf_batch.py --full")
 
-    # --- 拟合全量模型并保存 ---
-    t0 = time.time()
-    surr = AeroSurrogate(bounds).fit(
-        d["X_lf"], d["Cl_lf"], d["Cd_lf"],
-        d["X_hf"], d["Cl_hf"], d["Cd_hf"])
     out = ROOT / "surrogate" / "models" / "aero_cokriging.pkl"
-    surr.save(out)
-    print(f"模型已保存: {out}  ({time.time()-t0:.1f}s)", flush=True)
-    print(f"  Co-Kriging 训练点: Cl 用 LF={surr.cl.n_lf} HF={surr.cl.n_hf}; "
-          f"Cd 用 LF={surr.cd.n_lf} HF={surr.cd.n_hf}")
+    if args.skip_fit:
+        surr = AeroSurrogate.load(out)
+        print(f"已加载现有模型 (跳过拟合): {out}", flush=True)
+        print(f"  Co-Kriging 训练点: Cl 用 LF={surr.cl.n_lf} HF={surr.cl.n_hf}; "
+              f"Cd 用 LF={surr.cd.n_lf} HF={surr.cd.n_hf}")
+    else:
+        # --- 拟合全量模型并保存 ---
+        # Cl/Cd 各自按有效性清洗后再封顶, 两者子集可不同 (各自 isfinite)。
+        Xl_cl, Cl_lf = _subsample_lf(d["X_lf"], d["Cl_lf"], fit_cap, seed=1)
+        Xl_cd, Cd_lf = _subsample_lf(d["X_lf"], d["Cd_lf"], fit_cap, seed=2)
+        print(f"全量拟合 LF 点: Cl {len(Xl_cl)} / Cd {len(Xl_cd)} "
+              f"(封顶 {fit_cap if fit_cap else '全部'})", flush=True)
+        t0 = time.time()
+        surr = AeroSurrogate(bounds)
+        print("  拟合 Cl Co-Kriging ...", flush=True)
+        surr.cl.fit(Xl_cl, Cl_lf, d["X_hf"], d["Cl_hf"])
+        print(f"  Cl 完成 ({time.time()-t0:.1f}s); 拟合 Cd Co-Kriging ...", flush=True)
+        surr.cd.fit(Xl_cd, Cd_lf, d["X_hf"], d["Cd_hf"])
+        surr.save(out)
+        print(f"模型已保存: {out}  ({time.time()-t0:.1f}s)", flush=True)
+        print(f"  Co-Kriging 训练点: Cl 用 LF={surr.cl.n_lf} HF={surr.cl.n_hf}; "
+              f"Cd 用 LF={surr.cd.n_lf} HF={surr.cd.n_hf}")
 
     if args.no_cv:
         return
@@ -139,7 +163,7 @@ def main() -> None:
     for name, y_lf, y_hf in [("Cl", d["Cl_lf"], d["Cl_hf"]),
                              ("Cd", d["Cd_lf"], d["Cd_hf"])]:
         ck = loo_cv_cokriging(d["X_lf"], y_lf, d["X_hf"], y_hf, bounds,
-                              lf_cap=args.cv_lf_cap)
+                              lf_cap=args.cv_lf_cap, tag=name)
         hf = loo_cv_hf_only(d["X_hf"], y_hf, bounds)
         print(f"{name:<6}{'Co-Kriging':<18}{ck['rmse']:>10.4f}"
               f"{ck['mae']:>10.4f}{ck['r2']:>8.3f}")
