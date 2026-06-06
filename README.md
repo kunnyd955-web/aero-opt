@@ -53,7 +53,7 @@ XFOIL LF   SU2 HF        ← multi-fidelity solvers
 | Phase 0 — CST Parameterization | ✅ Done | NACA 0012/2412 fit MSE < 1e-5 |
 | Phase 1 — XFOIL LF Sampling | ✅ Done | End-to-end batch sampling, in-memory backend |
 | Phase 2 — SU2 Transition CFD | ✅ Done | gmsh BL mesh + SU2 8.5 SST/γ-Reθ; NACA0012 Re=2e5 → CL 0.446 / Cd 0.021 |
-| Phase 3 — Co-Kriging Surrogate | ✅ Done | MFK Cl/Cd surrogate over LF(808)+HF(**55**, expanded from 26 via `--append`); 26-pt LOO-CV: Cd R²≈0.61 (Co-Kriging RMSE −3% vs HF-only), Cl R²≈0.20; 55-pt re-CV pending; 6 tests pass |
+| Phase 3 — Co-Kriging Surrogate | ✅ Done | MFK Cl/Cd surrogate over LF(808)+HF(**55**, expanded from 26 via `--append`); 55-pt LOO-CV: **Cd R²≈0.88** via Co-Kriging (RMSE −12% vs HF-only), **Cl R²≈0.67** via HF-only KRG (multi-fidelity hurts Cl, +23% RMSE); 6 tests pass |
 | Phase 4 — Global Optimization | ⬜ Todo | — |
 
 ---
@@ -152,8 +152,8 @@ Deviations from the original plan discovered during implementation:
 - **HF turbulence-intensity calibration**: Inlet `FREESTREAM_TURBULENCEINTENSITY=0.002` (0.2%) compensates convective decay so leading-edge Tu≈0.1% (Ncrit=9 equivalent). The exact factor should be back-calculated from a measured LE Tu once volume output is post-processed (plan §5.2).
   **HF 湍流度校准**：入口 0.2% 补偿衰减使前缘约 0.1%，精确因子待用前缘实测值反推。
 
-- **Surrogate accuracy is HF-sample-limited**: LOO-CV (26 HF points) gives a usable Cd model (R²≈0.61, Co-Kriging RMSE 3% below single-fidelity KRG — the multi-fidelity correction works) but a weak Cl model (R²≈0.20, no multi-fidelity gain). 26 points in a 12-D design space is sparse; Cl prediction needs more HF samples (or adaptive infill during Phase 4) before optimization can trust absolute L/D. The HF set has since been expanded 26→55 valid points (`sample_hf_batch.py --append --seed <new>`, retrained model saved); the 55-point LOO-CV to re-quantify Cl gain is still pending. Training-side mitigations already in place: input normalization by `LF_BOUNDS`, LF-point caps (`--fit-lf-cap`/`--cv-lf-cap`) to bound MFK's O(n³) cost.
-  **代理精度受高保真样本量限制**：26 个 HF 点的 LOO-CV 下 Cd 模型可用（R²≈0.61，多保真较单保真 RMSE 降 3%，校正生效），但 Cl 模型偏弱（R²≈0.20，无多保真增益）。12 维空间 26 点过稀疏，Cl 需补采 HF 点。现已用 `--append` 把有效 HF 点从 26 扩到 55 并重训模型，55 点的 LOO-CV 复评待补。
+- **Per-output fidelity choice (HF-sample-driven)**: Expanding the HF set 26→55 valid points (`sample_hf_batch.py --append --seed <new>`) sharply improved both surrogates, but the 55-point LOO-CV reveals the best model differs per output. **Cd:** Co-Kriging wins (R²≈0.88, RMSE 12% below single-fidelity KRG) — the LF→HF bias is systematic and learnable, so multi-fidelity transfer helps. **Cl:** single-fidelity HF-only Kriging now wins (R²≈0.67) while Co-Kriging is worse (R²≈0.50, +23% RMSE) — the XFOIL→SU2 Cl discrepancy is not consistent enough to transfer, so borrowing LF data injects noise. Takeaway for Phase 4: drive Cd from the Co-Kriging model and Cl from HF-only Kriging. Both outputs are now in a usable range (vs the earlier 26-point CV: Cd R²≈0.61, Cl R²≈0.20). Training-side mitigations in place: input normalization by `LF_BOUNDS`, LF-point caps (`--fit-lf-cap`/`--cv-lf-cap`) to bound MFK's O(n³) cost.
+  **按输出选择保真度（取决于 HF 样本量）**：把有效 HF 点从 26 扩到 55 后两个代理都大幅改善，但 55 点 LOO-CV 显示二者最优模型不同。**Cd**：Co-Kriging 最优（R²≈0.88，RMSE 较单保真低 12%），LF→HF 偏差系统且可学，多保真有效。**Cl**：单保真纯 HF Kriging 反而最优（R²≈0.67），Co-Kriging 偏弱（R²≈0.50，RMSE 高 23%），XFOIL→SU2 的 Cl 差异不够一致，借 LF 反添噪。Phase 4 据此：Cd 用 Co-Kriging、Cl 用纯 HF Kriging。两者均已可用（对比 26 点：Cd 0.61、Cl 0.20）。
 
 ---
 
